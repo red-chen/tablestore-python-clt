@@ -1,6 +1,6 @@
 
 # 表格存储Command Line Tool (Python)
->VERSION : 2017-11-05
+>VERSION : 2017-12-12
 
 # SDK安装
 >需要先安装Python SDK，方式如下
@@ -328,4 +328,21 @@ export
 ```
 export 
 export --with_ts
+```
+
+# 命令：import_cvs
+> 导入数据到到表格存储
+
+`参数详解：`
+ 
+```
+import_cvs
+    --file 
+    --column
+```
+
+`样例：`
+
+```
+import_cvs --file /tmp/mydata.cvs --column address:string,weight:int
 ```

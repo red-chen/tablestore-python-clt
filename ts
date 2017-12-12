@@ -6,13 +6,17 @@ import json
 import argparse
 import traceback
 import cmd
+import csv
 
 from tablestore import *
+
+reload(sys)
+sys.setdefaultencoding("utf-8")
 
 GLOBAL_CONF = None
 GLOBAL_RUNNING = True
 
-VERSION = "2017-11-05"
+VERSION = "2017-12-12"
 GLOBAL_CONFIG_FILE = ".table_store_config"
 GLOBAL_HISTORY_FILE = ".history"
 GLOBAL_USE_FILE = ".table"
@@ -102,16 +106,21 @@ def _handle_use_table(args):
 
     _save_config(GLOBAL_USE_FILE, GLOBAL_USE_TABLE)
 
+def _get_name_and_type(input):
+    ss = input.split(":")
+    if len(ss) != 2:
+        raise Exception("Column format error, expect '{ColumnName}:{Type}'")
+
+    return ss[0], ss[1].upper()
+
 def _get_pk(input):
     items = input.split(",")
 
     out = []
     for i in items:
-        ss = i.split(":")
-        if len(ss) != 2:
-            raise Exception("Primary Key format error, expect '{ColumnName}:{Type}'")
+        name, type = _get_name_and_type(i)
 
-        out.append((ss[0], ss[1].upper()))
+        out.append((name, type))
 
     return out
 
@@ -152,6 +161,25 @@ def _get_pk_value(input, default=None):
             out.append((_utf8(m[0]), default))
         return out
 
+def _get_pk_value_cvs(items):
+    global GLOBAL_USE_TABLE
+    if not GLOBAL_USE_TABLE:
+        raise Exception("Please use table first")
+
+    meta = GLOBAL_USE_TABLE["pk"]
+    if len(meta) > len(items):
+        raise Exception("The count of primary key is %s, but input len is %s"%(len(meta), len(items)))
+    out = []
+    for i in range(0, len(meta)):
+       p = meta[i]
+       if p[1] == "INTEGER":
+           out.append((_utf8(p[0]), int(items[i])))
+       elif p[1] == "STRING":
+           out.append((_utf8(p[0]), _utf8(items[i])))
+       else:
+           raise Exception("Not suppert the type(%s)."%(p[1]))
+    return out
+       
 def _get_attr_value(input, with_ts):
     items = input.strip("\n").split(",")
     out = []
@@ -177,6 +205,7 @@ def _get_attr_value(input, with_ts):
             if len(ss) != 3:
                 raise Exception("Format error")
 
+            # TODO
             if ss[1].upper() == "STRING":
                 out.append((_utf8(ss[0]), _utf8(ss[2])))
             elif ss[1].upper() == "INTEGER":
@@ -186,6 +215,37 @@ def _get_attr_value(input, with_ts):
             else:
                 raise Exception("Not suppert the type(%s)"%(ss[1]))
 
+    return out
+
+def _get_ots_data(name, type, str_value):
+    if type == "STRING":
+        return (_utf8(name), _utf8(str_value))
+    elif type == "INTEGER":
+        return (_utf8(name), int(str_value))
+    elif type == "DOUBLE":
+        return (_utf8(name), float(str_value))
+    else:
+        raise Exception("Not suppert the type(%s)"%(ss[1]))
+
+def _get_attr_value_cvs(items, column):
+    global GLOBAL_USE_TABLE
+    if not GLOBAL_USE_TABLE:
+        raise Exception("Please use table first")
+
+    meta = GLOBAL_USE_TABLE["pk"]
+    pk_len = len(meta)
+    remain_len = len(items) - pk_len
+    columns = column.split(",")
+    if len(columns) != remain_len:
+        raise Exception("Expect column lenght is %s but count of values is %s" % (len(columns), remain_len))
+
+    out = []
+    for i in range(0, remain_len):
+        c = columns[i]
+        value = items[pk_len + i]
+        name, type = _get_name_and_type(c)
+        out.append(_get_ots_data(name, type, value))
+        
     return out
 
 def _get_pk_and_attr_value(input, with_ts):
@@ -201,6 +261,13 @@ def _get_pk_and_attr_value(input, with_ts):
     pk = _get_pk_value(items[0])
     attr = _get_attr_value(items[1], with_ts)
 
+    return pk, attr
+
+def _get_pk_and_attr_value_cvs(row, column):
+    
+    pk = _get_pk_value_cvs(row)
+    attr = _get_attr_value_cvs(row, column)
+    print attr
     return pk, attr
 
 def _get_cu(input):
@@ -328,6 +395,19 @@ def _handle_import(args):
                 break
 
             pk, attr = _get_pk_and_attr_value(line, args.with_ts)
+            row = Row(pk, attr)
+            consumed, return_row = ots.put_row(_get_table_name(), row)
+            print "ReadCU:%s, WriteCU:%s"%(consumed.read, consumed.write)
+
+        print "OK"
+
+def _handle_import_cvs(args):
+    ots = _get_ots_client()
+
+    with open(args.file) as fp:
+        reader = csv.reader(fp, delimiter=args.delimiter, quotechar=args.quotechar)
+        for row in reader:
+            pk, attr = _get_pk_and_attr_value_cvs(row, args.column)
             row = Row(pk, attr)
             consumed, return_row = ots.put_row(_get_table_name(), row)
             print "ReadCU:%s, WriteCU:%s"%(consumed.read, consumed.write)
@@ -504,6 +584,14 @@ def gen_sub_parser():
     sub_export.add_argument("--direction", dest="direction", default="FORWARD", help="FORWARD|BACKWARD, default: FORWARD")
     sub_export.add_argument("--with_ts", dest="with_ts", action="store_true", help="show timestamp")
     sub_export.set_defaults(func=_handle_export)
+
+    # import cvs 
+    sub_import_cvs = subs.add_parser('import_cvs', help="import cvs data of file to tablestore")
+    sub_import_cvs.add_argument("--file", dest="file", required=True, help="import data file,  row format: '{V1},{V2},{V3},....'")
+    sub_import_cvs.add_argument("--column", dest="column", required=True, help="attribute column, format: '{Name}:{Type},{Name}:{Type},...'")
+    sub_import_cvs.add_argument("--delimiter", dest="delimiter", default=",", help="delimiter, default:','")
+    sub_import_cvs.add_argument("--quotechar", dest="quotechar", default='"', help="quotechar, default:'\"'")
+    sub_import_cvs.set_defaults(func=_handle_import_cvs)
 
     return parser
 
